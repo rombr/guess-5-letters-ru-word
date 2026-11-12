@@ -1,41 +1,30 @@
+import asyncio
 import os
 import logging
 
-from aiogram import Bot, Dispatcher, executor, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.dispatcher.filters import Text
-from aiogram.dispatcher.handler import current_handler
-from aiogram.dispatcher.middlewares import BaseMiddleware
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.enums import ParseMode
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.dispatcher.middlewares.base import BaseMiddleware
 
 from core import guess
 
 
-TELEGRAM_API_TOKEN = os.environ.get("TELEGRAM_API_TOKEN")
-
-
 logger = logging.getLogger("bot")
 
-
 storage = MemoryStorage()
-
-
-# Initialize bot and dispatcher
-bot = Bot(token=TELEGRAM_API_TOKEN)
-dp = Dispatcher(bot, storage=storage)
+dp = Dispatcher(storage=storage)
 
 
 class DebugMiddleware(BaseMiddleware):
-    async def on_process_message(self, message: types.Message, data: dict):
-        """
-        This handler is called when dispatcher receives a message
-
-        :param message:
-        """
-        # Get current handler
-        handler = current_handler.get()
-        logger.info(f"Call handler: {handler.__name__}")
+    async def __call__(self, handler, event, data):
+        registered_handler = data.get("handler")
+        if registered_handler:
+            logger.info("Call handler: %s", registered_handler.callback.__name__)
+        return await handler(event, data)
 
 
 # States
@@ -50,6 +39,14 @@ class WordForm(StatesGroup):
 RU_LETTERS = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"
 DEFAULT_WORD_MASK = "*" * 5
 SKIP_PHRASE = "Skip->"
+
+
+def reply_keyboard(text: str) -> types.ReplyKeyboardMarkup:
+    return types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text=text)]],
+        resize_keyboard=True,
+        selective=True,
+    )
 
 
 def make_guess_answer(message: str) -> str:
@@ -79,13 +76,13 @@ def normalize_letters(letters: str) -> str:
 
 
 def ru_letters_filter(message: types.Message) -> bool:
-    letters = normalize_input(message.text)
+    letters = normalize_input(message.text or "")
     other_letters = set(letters) - set(RU_LETTERS)
     return bool(letters) and not other_letters
 
 
 def word_mask_filter(message: types.Message) -> bool:
-    word_mask = normalize_input(message.text)
+    word_mask = normalize_input(message.text or "")
     if len(word_mask) != 5:
         return False
 
@@ -93,229 +90,229 @@ def word_mask_filter(message: types.Message) -> bool:
     return not other_letters
 
 
-@dp.message_handler(state="*", commands=["start", "help"])
+@dp.message(F.text, Command("start", "help"))
 async def cmd_start_help(message: types.Message, state: FSMContext):
     """
     This handler will be called when user sends `/start` or `/help` command
     """
     current_state = await state.get_state()
     if current_state:
-        await state.finish()
+        await state.clear()
 
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("New word", callback_data="new_word"))
+    markup = types.InlineKeyboardMarkup(
+        inline_keyboard=[[types.InlineKeyboardButton(text="New word", callback_data="new_word")]]
+    )
     await message.answer(
         "Hi!\nI will help you to guess 5 letters russian word.\n Let's start",
         reply_markup=markup,
     )
 
 
-@dp.callback_query_handler(text="new_word")
+@dp.callback_query(StateFilter(None), F.data == "new_word")
 async def new_word_button_callback(callback: types.CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
     if current_state:
-        await state.finish()
+        await state.clear()
 
     # Set state
-    await WordForm.yes_letters_new.set()
+    await state.set_state(WordForm.yes_letters_new)
 
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
-    markup.add(SKIP_PHRASE)
+    markup = reply_keyboard(SKIP_PHRASE)
 
-    await callback.message.answer("Please enter yes letters:", reply_markup=markup)
+    if isinstance(callback.message, types.Message):
+        await callback.message.answer("Please enter yes letters:", reply_markup=markup)
 
     # commit callback
     await callback.answer()
 
 
-@dp.message_handler(state="*", commands="new")
+@dp.message(F.text, Command("new"))
 async def cmd_new(message: types.Message, state: FSMContext):
     """
     Guess a new word
     """
     current_state = await state.get_state()
     if current_state:
-        await state.finish()
+        await state.clear()
 
     # Set state
-    await WordForm.yes_letters_new.set()
+    await state.set_state(WordForm.yes_letters_new)
 
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
-    markup.add(SKIP_PHRASE)
+    markup = reply_keyboard(SKIP_PHRASE)
 
     await message.answer("Please enter yes letters:", reply_markup=markup)
 
 
-@dp.message_handler(state="*", commands="guess")
+@dp.message(F.text, Command("guess"))
 async def cmd_guess(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        guess_answer = make_guess_answer(
-            guess(
-                data.get("yes_letters", ""),
-                data.get("no_letters", ""),
-                data.get("word_mask", DEFAULT_WORD_MASK),
-            )
+    data = await state.get_data()
+    guess_answer = make_guess_answer(
+        guess(
+            data.get("yes_letters", ""),
+            data.get("no_letters", ""),
+            data.get("word_mask", DEFAULT_WORD_MASK),
         )
-        await message.answer(guess_answer, reply_markup=types.ReplyKeyboardRemove())
+    )
+    await message.answer(guess_answer, reply_markup=types.ReplyKeyboardRemove())
 
 
-@dp.message_handler(state="*", commands="yes_letters")
+@dp.message(F.text, Command("yes_letters"))
 async def cmd_yes_letters(message: types.Message, state: FSMContext):
     """
     This handler will be called when user sends `/yes_letters` command
     """
-    async with state.proxy() as data:
-        current_value = data.get("yes_letters") or ""
+    data = await state.get_data()
+    current_value = data.get("yes_letters") or ""
 
-        await WordForm.yes_letters_add.set()
+    await state.set_state(WordForm.yes_letters_add)
 
+    await message.answer(
+        "Please enter new yes letters:", reply_markup=types.ReplyKeyboardRemove()
+    )
+    if current_value:
         await message.answer(
-            "Please enter new yes letters:", reply_markup=types.ReplyKeyboardRemove()
+            f"Current is `{current_value}`", parse_mode=ParseMode.MARKDOWN
         )
-        if current_value:
-            await message.answer(
-                f"Current is `{current_value}`", parse_mode=types.ParseMode.MARKDOWN
-            )
 
 
-@dp.message_handler(state="*", commands="no_letters")
+@dp.message(F.text, Command("no_letters"))
 async def cmd_no_letters(message: types.Message, state: FSMContext):
     """
     This handler will be called when user sends `/no_letters` command
     """
-    async with state.proxy() as data:
-        current_value = data.get("no_letters") or ""
+    data = await state.get_data()
+    current_value = data.get("no_letters") or ""
 
-        await WordForm.no_letters_add.set()
+    await state.set_state(WordForm.no_letters_add)
 
+    await message.answer(
+        "Please enter new no letters:", reply_markup=types.ReplyKeyboardRemove()
+    )
+    if current_value:
         await message.answer(
-            "Please enter new no letters:", reply_markup=types.ReplyKeyboardRemove()
+            f"Current is `{current_value}`", parse_mode=ParseMode.MARKDOWN
         )
-        if current_value:
-            await message.answer(
-                f"Current is `{current_value}`", parse_mode=types.ParseMode.MARKDOWN
-            )
 
 
-@dp.message_handler(state="*", commands="word_mask")
+@dp.message(F.text, Command("word_mask"))
 async def cmd_word_mask(message: types.Message, state: FSMContext):
     """
     This handler will be called when user sends `/word_mask` command
     """
-    async with state.proxy() as data:
-        current_value = data.get("word_mask") or ""
+    data = await state.get_data()
+    current_value = data.get("word_mask") or ""
 
-        await WordForm.word_mask.set()
+    await state.set_state(WordForm.word_mask)
 
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
-        markup.add(current_value or DEFAULT_WORD_MASK)
+    markup = reply_keyboard(current_value or DEFAULT_WORD_MASK)
 
-        await message.answer("Please enter new word mask:", reply_markup=markup)
-        if current_value:
+    await message.answer("Please enter new word mask:", reply_markup=markup)
+    if current_value:
 
-            await message.answer(
-                f"Current is `{current_value}`",
-                parse_mode=types.ParseMode.MARKDOWN,
-                reply_markup=markup,
-            )
+        await message.answer(
+            f"Current is `{current_value}`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=markup,
+        )
 
 
-@dp.message_handler(
-    Text(equals=SKIP_PHRASE, ignore_case=True), state=WordForm.yes_letters_new
+@dp.message(
+    WordForm.yes_letters_new, F.text.casefold() == SKIP_PHRASE.casefold()
 )
 async def skip_process_yes_letters_new(message: types.Message, state: FSMContext):
     """
     Skip process yes letters init
     """
-    await WordForm.next()
+    await state.set_state(WordForm.no_letters_new)
     await message.answer(
         "Please enter no letters:", reply_markup=types.ReplyKeyboardRemove()
     )
 
 
-@dp.message_handler(ru_letters_filter, state=WordForm.yes_letters_new)
+@dp.message(WordForm.yes_letters_new, F.text, ru_letters_filter)
 async def process_yes_letters_new(message: types.Message, state: FSMContext):
     """
     Process yes letters init
     """
-    async with state.proxy() as data:
-        data["yes_letters"] = normalize_letters(message.text)
+    data = await state.get_data()
+    data["yes_letters"] = normalize_letters(message.text)
+    await state.update_data(yes_letters=data["yes_letters"])
 
-    await WordForm.next()
+    await state.set_state(WordForm.no_letters_new)
     await message.answer(
         "Please enter no letters:", reply_markup=types.ReplyKeyboardRemove()
     )
 
 
-@dp.message_handler(ru_letters_filter, state=WordForm.yes_letters_add)
+@dp.message(WordForm.yes_letters_add, F.text, ru_letters_filter)
 async def process_yes_letters_add(message: types.Message, state: FSMContext):
     """
     Process add yes letters
     """
-    async with state.proxy() as data:
-        current_value = data.get("yes_letters") or ""
-        data["yes_letters"] = normalize_letters(current_value + message.text)
+    data = await state.get_data()
+    current_value = data.get("yes_letters") or ""
+    data["yes_letters"] = normalize_letters(current_value + message.text)
+    await state.update_data(yes_letters=data["yes_letters"])
 
-        guess_answer = make_guess_answer(
-            guess(
-                data.get("yes_letters", ""),
-                data.get("no_letters", ""),
-                data.get("word_mask", DEFAULT_WORD_MASK),
-            )
+    guess_answer = make_guess_answer(
+        guess(
+            data.get("yes_letters", ""),
+            data.get("no_letters", ""),
+            data.get("word_mask", DEFAULT_WORD_MASK),
         )
-        await bot.send_message(
-            message.chat.id,
-            guess_answer,
-            reply_markup=types.ReplyKeyboardRemove(),
-        )
+    )
+    await message.answer(
+        guess_answer,
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
 
 
-@dp.message_handler(ru_letters_filter, state=WordForm.no_letters_new)
+@dp.message(WordForm.no_letters_new, F.text, ru_letters_filter)
 async def process_no_letters_new(message: types.Message, state: FSMContext):
     """
     Process no letters init
     """
     # Update state and data
-    await WordForm.next()
+    await state.set_state(WordForm.word_mask)
     await state.update_data(no_letters=normalize_letters(message.text))
 
     # Configure ReplyKeyboardMarkup
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
-    markup.add(DEFAULT_WORD_MASK)
+    markup = reply_keyboard(DEFAULT_WORD_MASK)
 
     await message.answer("What is the word mask?", reply_markup=markup)
 
 
-@dp.message_handler(ru_letters_filter, state=WordForm.no_letters_add)
+@dp.message(WordForm.no_letters_add, F.text, ru_letters_filter)
 async def process_no_letters_add(message: types.Message, state: FSMContext):
     """
     Process add no letters
     """
-    async with state.proxy() as data:
-        current_value = data.get("no_letters") or ""
-        data["no_letters"] = normalize_letters(current_value + message.text)
+    data = await state.get_data()
+    current_value = data.get("no_letters") or ""
+    data["no_letters"] = normalize_letters(current_value + message.text)
+    await state.update_data(no_letters=data["no_letters"])
 
-        guess_answer = make_guess_answer(
-            guess(
-                data.get("yes_letters", ""),
-                data.get("no_letters", ""),
-                data.get("word_mask", DEFAULT_WORD_MASK),
-            )
+    guess_answer = make_guess_answer(
+        guess(
+            data.get("yes_letters", ""),
+            data.get("no_letters", ""),
+            data.get("word_mask", DEFAULT_WORD_MASK),
         )
-        await bot.send_message(
-            message.chat.id,
-            guess_answer,
-            reply_markup=types.ReplyKeyboardRemove(),
-        )
+    )
+    await message.answer(
+        guess_answer,
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
 
 
-@dp.message_handler(
-    state=[
+@dp.message(
+    F.text,
+    StateFilter(
         WordForm.yes_letters_new,
         WordForm.yes_letters_add,
         WordForm.no_letters_new,
         WordForm.no_letters_add,
-    ]
+    )
 )
 async def cyrillic_letters_invalid(message: types.Message, state: FSMContext):
     """
@@ -324,54 +321,59 @@ async def cyrillic_letters_invalid(message: types.Message, state: FSMContext):
     await message.answer("Only cyrillic letters.\nPlease try again")
 
 
-@dp.message_handler(word_mask_filter, state=WordForm.word_mask)
+@dp.message(WordForm.word_mask, F.text, word_mask_filter)
 async def process_word_mask(message: types.Message, state: FSMContext):
     """
     Process word mask
     """
-    async with state.proxy() as data:
-        data["word_mask"] = normalize_input(message.text)
+    data = await state.get_data()
+    data["word_mask"] = normalize_input(message.text or "")
+    await state.update_data(word_mask=data["word_mask"])
 
-        # Remove keyboard
-        markup = types.ReplyKeyboardRemove()
+    # Remove keyboard
+    markup = types.ReplyKeyboardRemove()
 
-        guess_answer = make_guess_answer(
-            guess(
-                data.get("yes_letters", ""),
-                data.get("no_letters", ""),
-                data.get("word_mask", DEFAULT_WORD_MASK),
-            )
+    guess_answer = make_guess_answer(
+        guess(
+            data.get("yes_letters", ""),
+            data.get("no_letters", ""),
+            data.get("word_mask", DEFAULT_WORD_MASK),
         )
-        # And send message
-        await bot.send_message(
-            message.chat.id,
-            guess_answer,
-            reply_markup=markup,
-        )
+    )
+    # And send message
+    await message.answer(
+        guess_answer,
+        reply_markup=markup,
+    )
 
 
-@dp.message_handler(state=WordForm.word_mask)
+@dp.message(WordForm.word_mask, F.text)
 async def word_mask_invalid(message: types.Message, state: FSMContext):
     """
     If word mask is invalid
     """
-    async with state.proxy() as data:
-        current_value = data.get("word_mask") or ""
+    data = await state.get_data()
+    current_value = data.get("word_mask") or ""
 
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, selective=True)
-        markup.add(current_value or DEFAULT_WORD_MASK)
+    markup = reply_keyboard(current_value or DEFAULT_WORD_MASK)
 
-        await message.answer(
-            "Only cyrillic letters and *, length is 5.\nPlease try again",
-            reply_markup=markup,
-        )
+    await message.answer(
+        "Only cyrillic letters and *, length is 5.\nPlease try again",
+        reply_markup=markup,
+    )
+
+
+async def main():
+    token = os.environ.get("TELEGRAM_API_TOKEN")
+    if not token:
+        raise RuntimeError("Set TELEGRAM_API_TOKEN before starting the bot")
+
+    logging.basicConfig(level=logging.INFO)
+    dp.message.middleware(DebugMiddleware())
+    async with Bot(token=token) as bot:
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-
-    # Configure logging
-    logging.basicConfig(level=logging.INFO)
-
-    dp.middleware.setup(DebugMiddleware())
-
-    executor.start_polling(dp, skip_updates=True)
+    asyncio.run(main())
