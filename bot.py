@@ -68,21 +68,28 @@ def make_guess_answer(message: str) -> str:
     return formatted_message
 
 
+def normalize_input(text: str) -> str:
+    """Remove whitespace and lowercase user-entered letters or word masks."""
+    return "".join(text.split()).lower()
+
+
 def normalize_letters(letters: str) -> str:
-    normalized_letters = "".join(sorted(set((letters.strip().lower()))))
+    normalized_letters = "".join(sorted(set(normalize_input(letters))))
     return normalized_letters
 
 
 def ru_letters_filter(message: types.Message) -> bool:
-    other_letters = set(message.text.lower()) - set(RU_LETTERS)
-    return not other_letters
+    letters = normalize_input(message.text)
+    other_letters = set(letters) - set(RU_LETTERS)
+    return bool(letters) and not other_letters
 
 
 def word_mask_filter(message: types.Message) -> bool:
-    if len(message.text) != 5:
+    word_mask = normalize_input(message.text)
+    if len(word_mask) != 5:
         return False
 
-    other_letters = set(message.text.lower()) - set(RU_LETTERS + "*")
+    other_letters = set(word_mask) - set(RU_LETTERS + "*")
     return not other_letters
 
 
@@ -323,7 +330,7 @@ async def process_word_mask(message: types.Message, state: FSMContext):
     Process word mask
     """
     async with state.proxy() as data:
-        data["word_mask"] = message.text.lower()
+        data["word_mask"] = normalize_input(message.text)
 
         # Remove keyboard
         markup = types.ReplyKeyboardRemove()
