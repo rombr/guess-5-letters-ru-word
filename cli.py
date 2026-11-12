@@ -1,6 +1,5 @@
 from core import guess
 
-
 yes_letters = ""
 no_letters = ""
 word_mask = "*****"

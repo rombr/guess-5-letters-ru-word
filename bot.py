@@ -12,7 +12,6 @@ from aiogram.dispatcher.middlewares.base import BaseMiddleware
 
 from core import guess
 
-
 logger = logging.getLogger("bot")
 
 storage = MemoryStorage()
@@ -100,7 +99,9 @@ async def cmd_start_help(message: types.Message, state: FSMContext):
         await state.clear()
 
     markup = types.InlineKeyboardMarkup(
-        inline_keyboard=[[types.InlineKeyboardButton(text="New word", callback_data="new_word")]]
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text="New word", callback_data="new_word")]
+        ]
     )
     await message.answer(
         "Hi!\nI will help you to guess 5 letters russian word.\n Let's start",
@@ -216,9 +217,7 @@ async def cmd_word_mask(message: types.Message, state: FSMContext):
         )
 
 
-@dp.message(
-    WordForm.yes_letters_new, F.text.casefold() == SKIP_PHRASE.casefold()
-)
+@dp.message(WordForm.yes_letters_new, F.text.casefold() == SKIP_PHRASE.casefold())
 async def skip_process_yes_letters_new(message: types.Message, state: FSMContext):
     """
     Skip process yes letters init
@@ -312,7 +311,7 @@ async def process_no_letters_add(message: types.Message, state: FSMContext):
         WordForm.yes_letters_add,
         WordForm.no_letters_new,
         WordForm.no_letters_add,
-    )
+    ),
 )
 async def cyrillic_letters_invalid(message: types.Message, state: FSMContext):
     """
